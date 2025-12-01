@@ -473,12 +473,178 @@ void stepGaitIfNeeded() {
   }
 }
 
+// ===================== IMU SECTION (MPU9250 + AK8963) =====================
+
+// MPU9250 and AK8963 I2C addresses
+#define MPU9250_ADDR  0x68  // Default address (or 0x69 if AD0 is high)
+#define AK8963_ADDR   0x0C
+
+// MPU9250 registers
+#define MPU9250_PWR_MGMT_1   0x6B
+#define MPU9250_CONFIG       0x1A
+#define MPU9250_GYRO_CONFIG  0x1B
+#define MPU9250_ACCEL_CONFIG 0x1C
+#define MPU9250_INT_PIN_CFG  0x37
+#define MPU9250_WHO_AM_I     0x75
+
+// AK8963 registers
+#define AK8963_CNTL1         0x0A
+
+// IMU state machine
+enum IMUState {
+  IMU_IDLE,
+  IMU_READ_ACCEL,
+  IMU_READ_GYRO,
+  IMU_READ_MAG,
+  IMU_PUBLISH
+};
+
+IMUState imuState = IMU_IDLE;
+unsigned long lastIMUTime = 0;
+const int IMU_INTERVAL = 50; // 50 ms = 20 Hz
+bool imuAvailable = false;
+
+// Raw IMU data
+int16_t ax, ay, az, gx, gy, gz, mx, my, mz;
+
+// I2C helpers
+inline void writeByte(uint8_t addr, uint8_t reg, uint8_t data) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  Wire.write(data);
+  Wire.endTransmission();
+}
+
+inline uint8_t readByte(uint8_t addr, uint8_t reg) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  Wire.endTransmission(false);
+  Wire.requestFrom(addr, (uint8_t)1);
+  return Wire.read();
+}
+
+inline void readBytes(uint8_t addr, uint8_t reg, uint8_t count, uint8_t *dest) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  Wire.endTransmission(false);
+  Wire.requestFrom(addr, count);
+  uint8_t i = 0;
+  while (Wire.available() && i < count) {
+    dest[i++] = Wire.read();
+  }
+}
+
+// IMU init
+bool initMPU9250() {
+  // Check WHO_AM_I
+  uint8_t whoami = readByte(MPU9250_ADDR, MPU9250_WHO_AM_I);
+  if (whoami != 0x71 && whoami != 0x73) {
+    return false; // MPU9250 not found
+  }
+
+  // Wake up
+  writeByte(MPU9250_ADDR, MPU9250_PWR_MGMT_1, 0x00);
+  delay(100);
+
+  // Configure
+  writeByte(MPU9250_ADDR, MPU9250_CONFIG, 0x03);
+  writeByte(MPU9250_ADDR, MPU9250_GYRO_CONFIG, 0x00);    // ±250 dps
+  writeByte(MPU9250_ADDR, MPU9250_ACCEL_CONFIG, 0x00);   // ±2g
+  writeByte(MPU9250_ADDR, MPU9250_INT_PIN_CFG, 0x02);    // Enable magnetometer passthrough
+
+  // Init magnetometer
+  writeByte(AK8963_ADDR, AK8963_CNTL1, 0x00);
+  delay(10);
+  writeByte(AK8963_ADDR, AK8963_CNTL1, 0x16); // 16-bit, 100Hz
+  delay(10);
+
+  return true;
+}
+
+// Non-blocking IMU update
+void updateIMU() {
+  if (!imuAvailable) return;
+
+  unsigned long now = millis();
+
+  switch (imuState) {
+    case IMU_IDLE:
+      // Check if it's time to start new reading
+      if (now - lastIMUTime >= IMU_INTERVAL) {
+        imuState = IMU_READ_ACCEL;
+      }
+      break;
+
+    case IMU_READ_ACCEL: {
+      // Quick read: accel (6 bytes)
+      uint8_t rawData[6];
+      readBytes(MPU9250_ADDR, 0x3B, 6, rawData);
+      ax = ((int16_t)rawData[0] << 8) | rawData[1];
+      ay = ((int16_t)rawData[2] << 8) | rawData[3];
+      az = ((int16_t)rawData[4] << 8) | rawData[5];
+      imuState = IMU_READ_GYRO;
+      break;
+    }
+
+    case IMU_READ_GYRO: {
+      // Quick read: gyro (6 bytes)
+      uint8_t rawData[6];
+      readBytes(MPU9250_ADDR, 0x43, 6, rawData);
+      gx = ((int16_t)rawData[0] << 8) | rawData[1];
+      gy = ((int16_t)rawData[2] << 8) | rawData[3];
+      gz = ((int16_t)rawData[4] << 8) | rawData[5];
+      imuState = IMU_READ_MAG;
+      break;
+    }
+
+    case IMU_READ_MAG: {
+      // Quick read: magnetometer (6 bytes)
+      uint8_t rawData[6];
+      readBytes(AK8963_ADDR, 0x03, 6, rawData);
+      mx = ((int16_t)rawData[1] << 8) | rawData[0];
+      my = ((int16_t)rawData[3] << 8) | rawData[2];
+      mz = ((int16_t)rawData[5] << 8) | rawData[4];
+      imuState = IMU_PUBLISH;
+      break;
+    }
+
+    case IMU_PUBLISH: {
+      // Convert raw values to physical units
+      float ax_ms2 = (ax / 16384.0f) * 9.81f;
+      float ay_ms2 = (ay / 16384.0f) * 9.81f;
+      float az_ms2 = (az / 16384.0f) * 9.81f;
+
+      float gx_rads = (gx / 131.0f) * (PI / 180.0f);
+      float gy_rads = (gy / 131.0f) * (PI / 180.0f);
+      float gz_rads = (gz / 131.0f) * (PI / 180.0f);
+
+      // Stream IMU data over Serial in CSV format
+      Serial.print("IMU,");
+      Serial.print(ax_ms2, 4); Serial.print(",");
+      Serial.print(ay_ms2, 4); Serial.print(",");
+      Serial.print(az_ms2, 4); Serial.print(",");
+      Serial.print(gx_rads, 4); Serial.print(",");
+      Serial.print(gy_rads, 4); Serial.print(",");
+      Serial.print(gz_rads, 4); Serial.print(",");
+      Serial.print(mx); Serial.print(",");
+      Serial.print(my); Serial.print(",");
+      Serial.print(mz);
+      Serial.println();
+
+      // Reset state
+      lastIMUTime = now;
+      imuState = IMU_IDLE;
+      break;
+    }
+  }
+}
+
 // ===================== SETUP / LOOP ========================
 void setup() {
   Serial.begin(115200);
   while (!Serial) { ; }
 
-  Serial.println(F("=== Spider Robot Gait Controller ==="));
+  Serial.println(F("=== Spider Robot Gait Controller + IMU ==="));
   Serial.println(F("Controls (send over serial):"));
   Serial.println(F("  w = forward"));
   Serial.println(F("  s = backward"));
@@ -490,6 +656,10 @@ void setup() {
   Serial.println(F("  + / - = faster / slower"));
   Serial.println(F("  smoothSteps is set in code (default 20)."));
 
+  // I2C init for PCA9685 + IMU
+  Wire.begin();
+  Wire.setClock(400000); // 400 kHz I2C
+
   pca1.begin();
   pca2.begin();
   pca1.setPWMFreq(SERVO_FREQ);
@@ -499,6 +669,14 @@ void setup() {
   Serial.println(F("Moving all joints to HOME pose..."));
   setHomePose();
   delay(500);
+
+  // Initialize IMU
+  imuAvailable = initMPU9250();
+  if (imuAvailable) {
+    Serial.println(F("IMU_OK"));
+  } else {
+    Serial.println(F("IMU_FAIL"));
+  }
 
   Serial.println(F("Ready for gait commands."));
   activeGaitIndex = -1;
@@ -510,4 +688,5 @@ void setup() {
 void loop() {
   handleSerialCommands();  // read user commands (headless control)
   stepGaitIfNeeded();      // advance current gait if it's time (with smoothing)
+  updateIMU();             // non-blocking IMU state machine
 }
