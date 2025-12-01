@@ -2,11 +2,11 @@
 """
 Complete Spiderbot Launch File for Raspberry Pi
 - Starts YDLidar driver → publishes /scan
-- Starts Pi bridge node (Arduino + IMU) → publishes /imu, /joint_states
+- Starts Pi hard node (Arduino + IMU) → publishes /imu, /joint_states
 - Starts USB camera → publishes /camera/image_raw
 - Compresses camera images → publishes /camera/image_raw/compressed
 
-Location: ~/spiderbot_pi_ws/src/spiderbot_bridge/launch/spiderbot_full.launch.py
+Location: ~/spiderbot_pi_ws/src/spiderbot_hard/launch/spiderbot_full.launch.py
 """
 
 from launch import LaunchDescription
@@ -48,11 +48,11 @@ def generate_launch_description():
         ])
     )
 
-    # Pi Bridge Node (publishes /imu and /joint_states)
-    pi_bridge_node = Node(
+    # Pi hard Node (publishes /imu and /joint_states)
+    pi_hard_node = Node(
         package='spiderbot_bridge',
-        executable='pi_bridge_node',
-        name='pi_bridge_node',
+        executable='pi_hard_node',
+        name='pi_hard_node',
         output='screen',
         parameters=[{
             'arduino_port': LaunchConfiguration('arduino_port'),
@@ -112,7 +112,7 @@ def generate_launch_description():
         lidar_port_arg,
         camera_device_arg,
         ydlidar_launch,
-        pi_bridge_node,
+        pi_hard_node,
         camera_node,
         image_compressor,
     ])
