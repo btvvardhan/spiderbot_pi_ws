@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
 Complete Spiderbot Launch File for Raspberry Pi
-- Starts YDLidar driver
-- Starts Pi bridge node (Arduino communication + IMU)
-- Republishes all sensor data to network
+- Starts YDLidar driver → publishes /scan
+- Starts Pi bridge node (Arduino + IMU) → publishes /imu, /joint_states
+- Starts USB camera → publishes /camera/image_raw
+- Compresses camera images → publishes /camera/image_raw/compressed
+
+Location: ~/spiderbot_pi_ws/src/spiderbot_bridge/launch/spiderbot_full.launch.py
 """
 
 from launch import LaunchDescription
@@ -27,8 +30,14 @@ def generate_launch_description():
         default_value='/dev/ttyUSB0',
         description='YDLidar serial port'
     )
+    
+    camera_device_arg = DeclareLaunchArgument(
+        'camera_device',
+        default_value='/dev/video0',
+        description='Camera device'
+    )
 
-    # YDLidar launch file
+    # YDLidar launch file (publishes /scan)
     ydlidar_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
             PathJoinSubstitution([
@@ -39,7 +48,7 @@ def generate_launch_description():
         ])
     )
 
-    # Pi Bridge Node
+    # Pi Bridge Node (publishes /imu and /joint_states)
     pi_bridge_node = Node(
         package='spiderbot_bridge',
         executable='pi_bridge_node',
@@ -55,10 +64,55 @@ def generate_launch_description():
         respawn=True,
         respawn_delay=2.0
     )
+    
+    # USB Camera Node (publishes /camera/image_raw)
+    camera_node = Node(
+        package='usb_cam',
+        executable='usb_cam_node_exe',
+        name='usb_cam',
+        output='screen',
+        parameters=[{
+            'video_device': LaunchConfiguration('camera_device'),
+            'framerate': 30.0,
+            'image_width': 640,
+            'image_height': 480,
+            'pixel_format': 'mjpeg2rgb',  # Logitech Brio supports MJPEG
+            'camera_frame_id': 'camera_link',
+            'io_method': 'mmap',
+        }],
+        remappings=[
+            ('image_raw', '/camera/image_raw'),
+            ('camera_info', '/camera/camera_info'),
+        ],
+        respawn=True,
+        respawn_delay=2.0
+    )
+    
+    # Image Compressor (publishes /camera/image_raw/compressed)
+    # This saves ~90% bandwidth over WiFi!
+    image_compressor = Node(
+        package='image_transport',
+        executable='republish',
+        name='image_compressor',
+        output='screen',
+        arguments=[
+            'raw',
+            'compressed',
+            '--ros-args',
+            '--remap', 'in:=/camera/image_raw',
+            '--remap', 'out/compressed:=/camera/image_raw/compressed',
+            '--param', 'compressed.jpeg_quality:=70'
+        ],
+        respawn=True,
+        respawn_delay=2.0
+    )
 
     return LaunchDescription([
         arduino_port_arg,
         lidar_port_arg,
+        camera_device_arg,
         ydlidar_launch,
         pi_bridge_node,
+        camera_node,
+        image_compressor,
     ])
